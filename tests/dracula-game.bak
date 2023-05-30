@@ -1,0 +1,446 @@
+import assert from "assert";
+import * as anchor from "@project-serum/anchor";
+import { Program, BN } from "@project-serum/anchor";
+import { Token, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import {
+  PublicKey,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  SystemProgram,
+  SYSVAR_RENT_PUBKEY,
+} from "@solana/web3.js";
+import * as pda from "../packages/sdk/helpers/pda";
+import { MintTree } from "../packages/cli/utils/mint-tree";
+import { sleep } from "../packages/cli/utils/util";
+import { DraculaGame } from "../target/types/dracula_game";
+
+describe("dracula-game", () => {
+  // Configure the client to use the local cluster.
+  const provider = anchor.Provider.env();
+  anchor.setProvider(provider);
+
+  const program = anchor.workspace.DraculaGame as Program<DraculaGame>;
+
+  const ADMIN_KEYPAIR = Keypair.generate();
+  const BOT_KEYPAIR = Keypair.generate();
+  const USER_KEYPAIR = Keypair.generate();
+  const MINT_AUTH_KEYPAIR = Keypair.generate();
+
+  /// Merkle
+  let tree: MintTree;
+
+  /// PDA
+  let rewardVaultPda: PublicKey,
+    vaultAuthPda: PublicKey,
+    gamePda: PublicKey,
+    genPda: PublicKey,
+    playerPda: PublicKey,
+    humanEscrowPda: PublicKey,
+    vampireEscrowPda: PublicKey,
+    humanPda: PublicKey,
+    vampirePda: PublicKey,
+    lotteryPoolPda: PublicKey,
+    lotteryVaultPda: PublicKey;
+
+  // Token mint
+  let rewardMint: Token, humanMint: Token, vampireMint: Token;
+
+  // ATA
+  let beneficiaryAta: PublicKey,
+    humanNftAta: PublicKey,
+    vampireNftAta: PublicKey;
+
+  before(async () => {
+    // airdrop SOLs to admin
+    await provider.connection.confirmTransaction(
+      await provider.connection.requestAirdrop(
+        ADMIN_KEYPAIR.publicKey,
+        LAMPORTS_PER_SOL
+      ),
+      "confirmed"
+    );
+    // airdrop SOLs to user
+    await provider.connection.confirmTransaction(
+      await provider.connection.requestAirdrop(
+        USER_KEYPAIR.publicKey,
+        LAMPORTS_PER_SOL
+      ),
+      "confirmed"
+    );
+
+    /** Initialzie mint clients */
+    [rewardMint, humanMint, vampireMint] = await Promise.all([
+      Token.createMint(
+        provider.connection,
+        ADMIN_KEYPAIR,
+        MINT_AUTH_KEYPAIR.publicKey,
+        null,
+        0,
+        TOKEN_PROGRAM_ID
+      ),
+      Token.createMint(
+        provider.connection,
+        ADMIN_KEYPAIR,
+        MINT_AUTH_KEYPAIR.publicKey,
+        null,
+        0,
+        TOKEN_PROGRAM_ID
+      ),
+      Token.createMint(
+        provider.connection,
+        ADMIN_KEYPAIR,
+        MINT_AUTH_KEYPAIR.publicKey,
+        null,
+        0,
+        TOKEN_PROGRAM_ID
+      ),
+    ]);
+
+    /** Initilalize PDAs */
+    [
+      rewardVaultPda,
+      vaultAuthPda,
+      gamePda,
+      genPda,
+      playerPda,
+      humanEscrowPda,
+      vampireEscrowPda,
+      humanPda,
+      vampirePda,
+      lotteryPoolPda,
+      lotteryVaultPda,
+    ] = await Promise.all([
+      pda.getRewardVaultPda(),
+      pda.getVaultAuthPda(),
+      pda.getGamePda(),
+      pda.getGenPda(0),
+      pda.getPlayerPda(USER_KEYPAIR.publicKey),
+      pda.getEscrowPda(humanMint.publicKey),
+      pda.getEscrowPda(vampireMint.publicKey),
+      pda.getHumanPda(humanMint.publicKey),
+      pda.getVampirePda(vampireMint.publicKey),
+      pda.getLotteryPoolPda(),
+      pda.getLotteryVaultPda(),
+    ]);
+
+    /** Initialize ATAs */
+    [beneficiaryAta, humanNftAta, vampireNftAta] = await Promise.all([
+      rewardMint.createAssociatedTokenAccount(USER_KEYPAIR.publicKey),
+      humanMint.createAssociatedTokenAccount(USER_KEYPAIR.publicKey),
+      vampireMint.createAssociatedTokenAccount(USER_KEYPAIR.publicKey),
+    ]);
+
+    /** airdrop Human & Vampire */
+    await Promise.all([
+      humanMint.mintTo(
+        humanNftAta,
+        MINT_AUTH_KEYPAIR.publicKey,
+        [MINT_AUTH_KEYPAIR],
+        1
+      ),
+      vampireMint.mintTo(
+        vampireNftAta,
+        MINT_AUTH_KEYPAIR.publicKey,
+        [MINT_AUTH_KEYPAIR],
+        1
+      ),
+    ]);
+  });
+
+  it("should initialize game", async () => {
+    // initialize game pda
+    await program.rpc.initialize(BOT_KEYPAIR.publicKey, {
+      accounts: {
+        admin: ADMIN_KEYPAIR.publicKey,
+        rewardMint: rewardMint.publicKey,
+        rewardVault: rewardVaultPda,
+        vaultAuth: vaultAuthPda,
+        game: gamePda,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: SYSVAR_RENT_PUBKEY,
+      },
+      signers: [ADMIN_KEYPAIR],
+    });
+
+    // airdrop 9M $BLOOD to reward vault account
+    await rewardMint.mintTo(
+      rewardVaultPda,
+      MINT_AUTH_KEYPAIR.publicKey,
+      [MINT_AUTH_KEYPAIR],
+      9_000_000
+    );
+  });
+
+  it("should create lottery pool", async () => {
+    // create lottery pool
+    await program.rpc.createLotteryPool(BOT_KEYPAIR.publicKey, {
+      accounts: {
+        admin: ADMIN_KEYPAIR.publicKey,
+        rewardMint: rewardMint.publicKey,
+        vaultAuth: vaultAuthPda,
+        lotteryVault: lotteryVaultPda,
+        lotteryPool: lotteryPoolPda,
+        game: gamePda,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: SYSVAR_RENT_PUBKEY,
+      },
+      signers: [ADMIN_KEYPAIR],
+    });
+  });
+
+  it("should initialize Gen 0", async () => {
+    const genIndex = 0;
+
+    tree = new MintTree([
+      // Vampire Gen 0
+      { mint: vampireMint.publicKey.toBase58(), kind: 0, genIndex },
+      // Human O Gen 0
+      { mint: humanMint.publicKey.toBase58(), kind: 1, genIndex },
+    ]);
+
+    // initialize generation
+    await program.rpc.createGen(
+      {
+        merkleRoot: tree.getRoot(),
+        genIndex,
+      },
+      {
+        accounts: {
+          admin: ADMIN_KEYPAIR.publicKey,
+          gen: genPda,
+          game: gamePda,
+          systemProgram: SystemProgram.programId,
+        },
+        signers: [ADMIN_KEYPAIR],
+      }
+    );
+  });
+
+  it("should create player", async () => {
+    await program.rpc.createPlayer({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        player: playerPda,
+        systemProgram: SystemProgram.programId,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+
+  it("should create human", async () => {
+    await program.rpc.createHuman({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        nftMint: humanMint.publicKey,
+        nftEscrow: humanEscrowPda,
+        human: humanPda,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: SYSVAR_RENT_PUBKEY,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+
+  it("should stake human", async () => {
+    const index = 1;
+    const nftKind = 1;
+    const proof = tree.getProof(
+      index,
+      humanMint.publicKey.toBase58(),
+      nftKind,
+      0
+    );
+
+    await program.rpc.stakeHuman(
+      {
+        index: new BN(index),
+        proof,
+        nftKind,
+      },
+      {
+        accounts: {
+          user: USER_KEYPAIR.publicKey,
+          rewardVault: rewardVaultPda,
+          nftAta: humanNftAta,
+          nftEscrow: humanEscrowPda,
+          human: humanPda,
+          player: playerPda,
+          game: gamePda,
+          gen: genPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [USER_KEYPAIR],
+      }
+    );
+  });
+
+  it("should unstake human", async () => {
+    try {
+      await program.rpc.unstakeHuman({
+        accounts: {
+          user: USER_KEYPAIR.publicKey,
+          nftAta: humanNftAta,
+          nftEscrow: humanEscrowPda,
+          human: humanPda,
+          player: playerPda,
+          game: gamePda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [USER_KEYPAIR],
+      });
+      assert.ok(false);
+    } catch (err) {
+      assert.equal(err.msg, "Not enough reward amount");
+      assert.equal(err.code, 6011);
+    }
+  });
+
+  it("should harvest human", async () => {
+    // generate $BLOOD for 60 seconds
+    await sleep(60);
+
+    await program.rpc.harvestHuman({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        rewardMint: rewardMint.publicKey,
+        rewardVault: rewardVaultPda,
+        vaultAuth: vaultAuthPda,
+        nftMint: humanMint.publicKey,
+        human: humanPda,
+        player: playerPda,
+        game: gamePda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+
+  it("should create vampire", async () => {
+    await program.rpc.createVampire({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        nftMint: vampireMint.publicKey,
+        nftEscrow: vampireEscrowPda,
+        vampire: vampirePda,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        rent: SYSVAR_RENT_PUBKEY,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+
+  it("should stake vampire", async () => {
+    const index = 0;
+    const nftKind = 0;
+    const proof = tree.getProof(
+      index,
+      vampireMint.publicKey.toBase58(),
+      nftKind,
+      0
+    );
+
+    await program.rpc.stakeVampire(
+      {
+        index: new BN(index),
+        proof,
+        nftKind,
+      },
+      {
+        accounts: {
+          user: USER_KEYPAIR.publicKey,
+          rewardVault: rewardVaultPda,
+          nftAta: vampireNftAta,
+          nftEscrow: vampireEscrowPda,
+          vampire: vampirePda,
+          player: playerPda,
+          game: gamePda,
+          gen: genPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [USER_KEYPAIR],
+      }
+    );
+  });
+
+  it("should distribute rewards to vampires", async () => {
+    const game = await program.account.game.fetch(gamePda);
+    const rewardPerVampire = game.vampireRewardAmount.divn(game.totalVampires);
+
+    await program.rpc.refreshVampire(rewardPerVampire, {
+      accounts: {
+        bot: BOT_KEYPAIR.publicKey,
+        vampire: vampirePda,
+        game: gamePda,
+      },
+      signers: [BOT_KEYPAIR],
+    });
+
+    await program.rpc.refreshGame(rewardPerVampire, {
+      accounts: {
+        bot: BOT_KEYPAIR.publicKey,
+        game: gamePda,
+      },
+      signers: [BOT_KEYPAIR],
+    });
+  });
+
+  it("should unstake vampire", async () => {
+    try {
+      await program.rpc.unstakeVampire({
+        accounts: {
+          user: USER_KEYPAIR.publicKey,
+          rewardMint: rewardMint.publicKey,
+          rewardVault: rewardVaultPda,
+          vaultAuth: vaultAuthPda,
+          nftAta: vampireNftAta,
+          nftEscrow: vampireEscrowPda,
+          vampire: vampirePda,
+          player: playerPda,
+          game: gamePda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        },
+        signers: [USER_KEYPAIR],
+      });
+      assert.ok(false);
+    } catch (err) {
+      assert.equal(err.msg, "Not enough reward amount");
+      assert.equal(err.code, 6011);
+    }
+  });
+
+  it("should harvest vampire", async () => {
+    await program.rpc.harvestVampire({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        rewardMint: rewardMint.publicKey,
+        rewardVault: rewardVaultPda,
+        vaultAuth: vaultAuthPda,
+        nftMint: vampireMint.publicKey,
+        vampire: vampirePda,
+        player: playerPda,
+        game: gamePda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+
+  it("should claim for rewards", async () => {
+    await program.rpc.claim({
+      accounts: {
+        user: USER_KEYPAIR.publicKey,
+        beneficiaryAta,
+        rewardVault: rewardVaultPda,
+        vaultAuth: vaultAuthPda,
+        player: playerPda,
+        game: gamePda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+      signers: [USER_KEYPAIR],
+    });
+  });
+});

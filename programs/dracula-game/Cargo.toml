@@ -1,0 +1,20 @@
+[package]
+name = "dracula-game"
+version = "0.4.0"
+description = "Dracula Game"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "dracula_game"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.23.0"
+anchor-spl = "0.23.0"
